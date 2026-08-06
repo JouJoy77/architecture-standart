@@ -1,0 +1,94 @@
+@startuml C4_container_online_deposits
+!include <C4/C4_Container>
+
+title Банк «Стандарт» - открытие депозитов онлайн (MVP)\nC4: контейнеры
+LAYOUT_TOP_DOWN()
+
+Person(client, "Действующий клиент", "Подаёт заявку в интернет-банке")
+Person(prospect, "Потенциальный клиент", "Оставляет заявку на сайте")
+Person(call_center_operator, "Оператор банковского кол-центра", "Обрабатывает обращение и звонит потенциальному клиенту")
+Person(deposit_manager, "Менеджер депозитного бэк-офиса", "Обрабатывает заявки и публикует ставки")
+Person(credit_manager, "Сотрудник кредитного бэк-офиса", "Согласует параметры риска")
+Person(branch_employee, "Сотрудник отделения", "Идентифицирует нового клиента и оформляет документы")
+
+System_Boundary(internet_bank, "Интернет-банк - платформа подрядчика") {
+    Container(ib_app, "MVC-приложение интернет-банка", "ASP.NET MVC 4.5 / .NET Framework 4.5", "Web UI, аутентификация и REST-клиенты депозитных API")
+    ContainerDb(ib_db, "БД интернет-банка", "MS SQL", "Пользователи и данные действующего интернет-банка")
+}
+
+System(website, "Сайт банка", "PHP / React. Публичный каталог и форма заявки на обратный звонок")
+
+System_Boundary(deposit_platform, "Платформа депозитных заявок - разработка банка") {
+    Container(deposit_api, "API депозитов", "Java / Spring Boot", "REST, авторизация, проверка предложения и валидация запросов")
+    Container(application_service, "Сервис заявок", "Java / Spring Boot", "Оркестрация заявки, OTP и клиентские статусы")
+    Container(notification_service, "Сервис уведомлений", "Java / Spring Boot", "Одноразовые коды и уведомления о статусах")
+    ContainerDb(platform_db, "Операционная БД", "MS SQL", "Заявки, использованные версии предложений, статусы, inbox и outbox")
+}
+
+System(rate_distribution, "Сервис распространения ставок", "Java / Spring Boot и MS SQL. Единая read-модель продуктовых ставок и персональных предложений; компоненты показаны в ADR-002")
+
+System_Boundary(integration, "Интеграционный контур банка") {
+    Container(kafka, "Kafka", "Message broker", "Команды, события и очередь ошибок")
+    Container(abs_adapter, "Адаптер АБС", "Java / Spring Boot", "Входящие команды, лимиты нагрузки и публикация Oracle outbox")
+    Container(call_center_adapter, "Адаптер кол-центра", "Java / Spring Boot", "Создание обращения по заявке с сайта")
+}
+
+System_Boundary(abs, "АБС - собственная разработка банка") {
+    Container(abs_workplace, "АРМ сотрудника", "Delphi", "Работа с заявками, ставками и персональными предложениями по ролям")
+    Container(abs_deposit_module, "Модуль депозитов и ставок", "PL/SQL", "Заявки, решения, продуктовые ставки, персональные предложения и аудит")
+    ContainerDb(abs_db, "БД АБС", "Oracle", "Продукты, решения, предложения, счета, проводки и transactional outbox")
+}
+
+System(bank_call_center, "Система банковского кол-центра", "React / Spring Boot / PostgreSQL. Обращения и обратный звонок")
+System_Ext(sms_gateway, "СМС-шлюз телеком-оператора", "Отправка одноразовых кодов и уведомлений")
+
+Rel(client, ib_app, "Работает в интернет-банке", "HTTPS")
+Rel(ib_app, ib_db, "Читает и записывает", "SQL")
+Rel(ib_app, deposit_api, "Передаёт заявку и читает статусы", "REST / TLS")
+Rel(ib_app, rate_distribution, "Читает продуктовые ставки и предложения аутентифицированного клиента", "REST / TLS")
+
+Rel(prospect, website, "Оставляет заявку", "HTTPS")
+Rel(website, rate_distribution, "Читает публичный каталог ставок", "REST / TLS")
+Rel(website, deposit_api, "Передаёт заявку на обратный звонок", "REST / TLS")
+
+Rel(deposit_api, application_service, "Передаёт команды")
+Rel(deposit_api, rate_distribution, "Проверяет версию ставки или персональное предложение", "REST / mTLS")
+Rel(application_service, platform_db, "Хранит заявки и статусы", "SQL")
+Rel(application_service, notification_service, "Запрашивает OTP или уведомление")
+Rel(notification_service, sms_gateway, "Отправляет сообщение", "HTTPS API")
+Rel(sms_gateway, client, "Доставляет СМС")
+
+Rel(application_service, kafka, "Публикует команды через outbox")
+Rel(kafka, abs_adapter, "Передаёт команды регистрации и открытия")
+Rel(abs_adapter, abs_deposit_module, "Вызывает входящие команды", "Выделенный PL/SQL API")
+Rel(abs_deposit_module, abs_db, "Сохраняет операцию и outbox в одной транзакции", "SQL")
+Rel(abs_db, abs_adapter, "Отдаёт отложенные события из outbox", "Контролируемое чтение / PL/SQL")
+Rel(abs_adapter, kafka, "Публикует решения, открытия, ставки и персональные предложения")
+Rel(kafka, application_service, "Передаёт отложенные статусы заявки")
+Rel(kafka, rate_distribution, "Передаёт опубликованные ставки и персональные предложения")
+
+Rel(kafka, call_center_adapter, "Передаёт новую заявку с сайта")
+Rel(call_center_adapter, bank_call_center, "Создаёт обращение", "REST / API расширения")
+Rel(call_center_operator, bank_call_center, "Обрабатывает обращение и фиксирует результат")
+Rel(bank_call_center, abs_deposit_module, "Передаёт обращение после разговора", "Существующая интеграция; протокол не указан")
+
+Rel(deposit_manager, abs_workplace, "Обрабатывает заявки и публикует предложения")
+Rel(credit_manager, abs_workplace, "Согласует параметры риска в своей роли")
+Rel(branch_employee, abs_workplace, "Идентифицирует клиента и оформляет документы")
+Rel(abs_workplace, abs_deposit_module, "Вызывает процедуры")
+
+note right of ib_app
+Прямой доступ интернет-банка к Oracle АБС
+для платежей и текущих счетов - существующий
+технический долг за границей этого MVP.
+Новый депозитный поток его не использует.
+end note
+
+note right of rate_distribution
+Сервис общий для ADR-001 и ADR-002.
+Платформа заявок не хранит вторую витрину.
+Публичные ответы не содержат персональных предложений.
+end note
+
+SHOW_LEGEND()
+@enduml

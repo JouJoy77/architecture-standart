@@ -1,0 +1,61 @@
+@startuml C4_component_rate_distribution
+!include <C4/C4_Component>
+
+title Банк «Стандарт» - распространение депозитных ставок\nC4: компоненты сервиса распространения ставок
+LAYOUT_TOP_DOWN()
+
+Person(ops, "Служба сопровождения", "Разбирает ошибки и контролирует актуальность")
+
+Container(abs_rate_module, "Модуль ставок и outbox АБС", "PL/SQL / Oracle", "Публикует продуктовые ставки, персональные предложения и отзывы")
+Container(abs_adapter, "Адаптер АБС", "Java / Spring Boot", "Читает Oracle outbox, публикует события и выполняет повторы")
+Container(kafka, "Kafka", "Message broker", "RateVersionPublished, PersonalOfferPublished, Withdrawn и DLQ")
+
+System_Boundary(rate_platform, "Контур распространения ставок") {
+    Container_Boundary(rate_service, "Сервис распространения ставок [Java / Spring Boot]") {
+        Component(publication_consumer, "Consumer публикаций", "Kafka consumer", "Проверяет схему, ведёт inbox и применяет продуктовые и персональные события")
+        Component(rate_catalog, "Каталог ставок", "Application component", "Версии, периоды действия, персональные предложения и отзывы")
+        Component(read_api, "Read API", "REST / JSON", "Разделяет публичный маршрут и аутентифицированную выдачу предложений конкретного клиента")
+        Component(file_generator, "Генератор снимка", "CSV / ZIP / SHA-256", "Формирует только публичные ставки и manifest с контрольной суммой")
+        Component(package_crypto, "Защита комплекта", "OpenPGP", "Шифрует ZIP на ключ партнёра и создаёт отделённую подпись банка")
+        Component(sftp_delivery, "SFTP-доставщик", "SFTP / SSH", "Атомарно размещает .zip.pgp и .sig, выполняет повторы")
+        Component(receipt_handler, "Обработчик квитанций", "SFTP", "Разбирает результат импорта и помещает ошибки в карантин")
+        Component(freshness_monitor, "Монитор актуальности", "Scheduled jobs", "Контролирует SLO, квитанции и создаёт оповещения")
+    }
+    ContainerDb(rate_db, "Витрина ставок", "MS SQL", "Продуктовые версии, персональные предложения, inbox, доставки и аудит")
+}
+
+Container(call_center_backend, "Backend банковского кол-центра", "Spring Boot", "Читает публичные ставки, использует circuit breaker и кэш до 30 секунд")
+Container(bank_sftp, "Банковский SFTP", "SFTP / SSH", "Изолированный каталог партнёра")
+System(key_management, "Корпоративное хранилище ключей", "Выполняет операцию подписи внутри защищённого контура и хранит метаданные ротации")
+System_Ext(partner_call_center, "Система партнёрского кол-центра", "Проверяет подпись, расшифровывает комплект, атомарно обновляет справочник и возвращает квитанцию")
+
+Rel(abs_rate_module, abs_adapter, "Отдаёт неопубликованные записи outbox", "Контролируемое чтение")
+Rel(abs_adapter, kafka, "Публикует события", "TLS")
+Rel(kafka, publication_consumer, "Передаёт публикацию или отзыв")
+Rel(publication_consumer, rate_catalog, "Обновляет проекцию")
+Rel(rate_catalog, rate_db, "Читает и записывает версии и предложения", "SQL")
+Rel(read_api, rate_catalog, "Читает разрешённую проекцию")
+
+Rel(call_center_backend, read_api, "Читает публичные актуальные ставки", "REST / mTLS")
+
+Rel(rate_catalog, file_generator, "Передаёт новую публичную версию")
+Rel(file_generator, package_crypto, "Передаёт ZIP и manifest")
+Rel(package_crypto, key_management, "Передаёт хэш на подпись по идентификатору ключа", "Защищённый API")
+Rel(package_crypto, sftp_delivery, "Передаёт .zip.pgp и .sig")
+Rel(sftp_delivery, bank_sftp, "Атомарно размещает комплект", "SFTP / SSH")
+Rel(bank_sftp, partner_call_center, "Отдаёт зашифрованный комплект")
+Rel(partner_call_center, bank_sftp, "Размещает квитанцию")
+Rel(bank_sftp, receipt_handler, "Отдаёт квитанцию")
+Rel(receipt_handler, rate_db, "Сохраняет результат доставки", "SQL")
+
+Rel(freshness_monitor, rate_db, "Проверяет версии и доставки", "SQL")
+Rel(freshness_monitor, ops, "Создаёт оповещение или инцидент")
+
+note right of file_generator
+В комплект попадают только публичные условия.
+Персональные предложения отфильтровываются
+до формирования CSV.
+end note
+
+SHOW_LEGEND()
+@enduml
